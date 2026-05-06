@@ -89,7 +89,7 @@ typedef struct { float x, y, z; } Vec3;
     }
     return self;
 }
-- (void)onTick:(NSTimer *)t { (void)t; [self setNeedsDisplay:YES]; }
+- (void)onTick:(NSTimer *)t { (void)t; [self display]; }
 - (void)prepareOpenGL { [super prepareOpenGL]; glEnable(GL_DEPTH_TEST); }
 - (void)drawRect:(NSRect)dirtyRect {
     (void)dirtyRect;
