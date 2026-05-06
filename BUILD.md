@@ -1,11 +1,14 @@
-# Build and Run (macOS)
+# GNUstep Build and Run
+
+## Linux / GNUstep
 
 ```bash
-clang -fobjc-arc -framework Cocoa -framework OpenGL -framework GLKit main.m -o SceneViewer
-./SceneViewer scene.txt
+source /usr/share/GNUstep/Makefiles/GNUstep.sh
+make
+./obj/SceneViewer.app/SceneViewer scene.txt
 ```
 
-## `scene.txt` format
+## scene.txt format
 
 - `camera=x,y,z`
 - `textureRoot=/path/to/shared/textures`
@@ -13,10 +16,9 @@ clang -fobjc-arc -framework Cocoa -framework OpenGL -framework GLKit main.m -o S
 - `showLoops=true|false`
 - `model=/path/to/model.pof,x,y,z[,ovalpath=true,radius=30,speed=40,offset=0]`
 
-## Notes
+## Behavior
 
-- Camera always looks at world origin `(0,0,0)`.
-- Intended behavior includes loading POF detail level 0 only.
-- Missing `.pof` files fall back to a red cube placeholder.
-- Texture support target: `.dds`, `.png`, `.pcx` loaded from `textureRoot`.
-- If no skybox is configured, a black space background with stars should be generated.
+- Camera is defined in scene file and should point toward scene center.
+- Missing POF file path uses a red placeholder cube position.
+- `showLoops=true` enables 3px red orbital path overlays.
+- Target texture formats are `.dds`, `.png`, and `.pcx` from the shared `textureRoot`.
