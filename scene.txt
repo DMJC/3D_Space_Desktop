@@ -1,7 +1,9 @@
 # Example scene
-camera=0,10,40
-textureRoot=./textures
+camera=500,450,4500
+textureRoot=./maps/
 skybox=nebula
 showLoops=true
-model=./assets/fighter.pof,0,0,0,ovalpath=true,radius=20,speed=20,offset=0
-model=./assets/missing_ship.pof,35,0,5
+model=./EAM_Babylon4.pof,0,0,0,rotx=-20,roty=30,rotz=0,ovalpath=false,radius=0,speed=0,offset=0
+model=./MF_Tinashi.pof,0,-2000,0,0,0,0,ovalpath=true,radius=2000,speed=20,offset=0,ovalrotx=180,ovalroty=0,ovalrotz=30
+model=./MF_Tinashi.pof,0,-2200,0,0,0,0,ovalpath=true,radius=2000,speed=20,offset=0,ovalrotx=180,ovalroty=0,ovalrotz=40
+model=./MF_Tinashi.pof,0,-2400,0,0,0,0,ovalpath=true,radius=2000,speed=20,offset=0,ovalrotx=180,ovalroty=0,ovalrotz=50
