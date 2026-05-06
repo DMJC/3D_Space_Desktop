@@ -37,10 +37,16 @@ else if([key isEqualToString:@"model"]) { NSArray *chunks=[value componentsSepar
 @end
 
 typedef struct { float x,y,z; } V3;
-@interface POFMesh : NSObject
-@property(nonatomic,strong) NSMutableData *verts; // V3
-@property(nonatomic,strong) NSMutableData *tris;  // unsigned short *3
+@interface POFSubobject : NSObject
+@property(nonatomic,strong) NSMutableData *verts; // V3[]
+@property(nonatomic,strong) NSMutableData *tris;  // uint16 idx triplets
+@property(nonatomic) BOOL rotates;
 @property(nonatomic) float spinRate;
+@end
+@implementation POFSubobject @end
+
+@interface POFMesh : NSObject
+@property(nonatomic,strong) NSMutableArray *subobjects;
 @end
 @implementation POFMesh @end
 
@@ -50,22 +56,34 @@ static float ReadF32(const uint8_t *b){ float f; memcpy(&f,b,4); return f; }
 static POFMesh *LoadPOFDetail0(NSString *path, NSString **errorMsg) {
     NSData *d=[NSData dataWithContentsOfFile:path]; if(!d || d.length<16){ if(errorMsg)*errorMsg=@"file missing/unreadable"; return nil; }
     const uint8_t *b=d.bytes; if(!(b[0]=='P'&&b[1]=='S'&&b[2]=='P'&&b[3]=='O')){ if(errorMsg)*errorMsg=@"bad PSPO signature"; return nil; }
-    POFMesh *mesh=[POFMesh new]; mesh.verts=[NSMutableData data]; mesh.tris=[NSMutableData data]; mesh.spinRate=20.f;
-    // Minimal detail0 decode: scan for first IDATA-like block that stores packed xyz triples after marker "D0V0" and triangle indices after "D0I0".
-    // This is a pragmatic lightweight decoder used by this viewer; unsupported files gracefully fallback.
-    NSUInteger i=0; while(i+8<d.length){
-        if(memcmp(b+i,"D0V0",4)==0){ uint32_t count=ReadU32(b+i+4); NSUInteger off=i+8; if(off+count*12<=d.length){ for(uint32_t n=0;n<count;n++){ V3 v={ReadF32(b+off+n*12),ReadF32(b+off+n*12+4),ReadF32(b+off+n*12+8)}; [mesh.verts appendBytes:&v length:sizeof(V3)]; } } }
-        if(memcmp(b+i,"D0I0",4)==0){ uint32_t tcount=ReadU32(b+i+4); NSUInteger off=i+8; if(off+tcount*6<=d.length){ [mesh.tris appendBytes:b+off length:tcount*6]; } }
-        if(memcmp(b+i,"SPIN",4)==0 && i+8<=d.length){ mesh.spinRate=ReadF32(b+i+4); }
+
+    POFMesh *mesh=[POFMesh new]; mesh.subobjects=[NSMutableArray array];
+    // detail0 subobject stream: each subobject starts with "SOBJ" then contains D0V0, D0I0 and optional SPIN.
+    NSUInteger i=0;
+    while(i+12<d.length){
+        if(memcmp(b+i,"SOBJ",4)==0){
+            POFSubobject *so=[POFSubobject new]; so.verts=[NSMutableData data]; so.tris=[NSMutableData data]; so.spinRate=20.f; so.rotates=NO;
+            uint32_t span=ReadU32(b+i+4); NSUInteger j=i+8, end=i+8+span; if(end>d.length) end=d.length;
+            while(j+8<=end){
+                if(memcmp(b+j,"D0V0",4)==0 && j+8<=end){ uint32_t c=ReadU32(b+j+4); NSUInteger off=j+8; if(off+c*12<=end){ for(uint32_t n=0;n<c;n++){ V3 v={ReadF32(b+off+n*12),ReadF32(b+off+n*12+4),ReadF32(b+off+n*12+8)}; [so.verts appendBytes:&v length:sizeof(V3)]; } } }
+                if(memcmp(b+j,"D0I0",4)==0 && j+8<=end){ uint32_t t=ReadU32(b+j+4); NSUInteger off=j+8; if(off+t*6<=end) [so.tris appendBytes:b+off length:t*6]; }
+                if(memcmp(b+j,"SPIN",4)==0 && j+8<=end){ so.rotates=YES; so.spinRate=ReadF32(b+j+4); }
+                j++;
+            }
+            if(so.verts.length>0 && so.tris.length>0) [mesh.subobjects addObject:so];
+            i=end; continue;
+        }
         i++;
     }
-    if(mesh.verts.length==0 || mesh.tris.length==0){ if(errorMsg)*errorMsg=@"detail0 mesh blocks not found"; return nil; }
-    if(errorMsg)*errorMsg=[NSString stringWithFormat:@"detail0 verts=%lu tris=%lu",(unsigned long)(mesh.verts.length/sizeof(V3)),(unsigned long)(mesh.tris.length/6)];
+
+    if(mesh.subobjects.count==0){ if(errorMsg)*errorMsg=@"no detail0 subobjects found"; return nil; }
+    if(errorMsg)*errorMsg=[NSString stringWithFormat:@"detail0 subobjects=%lu",(unsigned long)mesh.subobjects.count];
     return mesh;
 }
 
 static void DrawCube(float s){ float h=s*0.5f; glBegin(GL_QUADS); glVertex3f(-h,-h,h);glVertex3f(h,-h,h);glVertex3f(h,h,h);glVertex3f(-h,h,h); glVertex3f(-h,-h,-h);glVertex3f(-h,h,-h);glVertex3f(h,h,-h);glVertex3f(h,-h,-h); glVertex3f(-h,h,-h);glVertex3f(-h,h,h);glVertex3f(h,h,h);glVertex3f(h,h,-h); glVertex3f(-h,-h,-h);glVertex3f(h,-h,-h);glVertex3f(h,-h,h);glVertex3f(-h,-h,h); glVertex3f(h,-h,-h);glVertex3f(h,h,-h);glVertex3f(h,h,h);glVertex3f(h,-h,h); glVertex3f(-h,-h,-h);glVertex3f(-h,-h,h);glVertex3f(-h,h,h);glVertex3f(-h,h,-h); glEnd(); }
-static void DrawMesh(POFMesh *m){ const V3 *v=(const V3*)m.verts.bytes; const uint16_t *idx=(const uint16_t*)m.tris.bytes; NSUInteger triCount=m.tris.length/6; glBegin(GL_TRIANGLES); for(NSUInteger t=0;t<triCount;t++){ for(int k=0;k<3;k++){ uint16_t ii=idx[t*3+k]; if(ii<m.verts.length/sizeof(V3)) glVertex3f(v[ii].x,v[ii].y,v[ii].z); }} glEnd(); }
+static void DrawSubobject(POFSubobject *s){ const V3 *v=(const V3*)s.verts.bytes; const uint16_t *idx=(const uint16_t*)s.tris.bytes; NSUInteger tc=s.tris.length/6; glBegin(GL_TRIANGLES); for(NSUInteger t=0;t<tc;t++){ for(int k=0;k<3;k++){ uint16_t ii=idx[t*3+k]; if(ii<s.verts.length/sizeof(V3)) glVertex3f(v[ii].x,v[ii].y,v[ii].z); }} glEnd(); }
+static void DrawMesh(POFMesh *m,float elapsed){ for(POFSubobject *s in m.subobjects){ glPushMatrix(); if(s.rotates) glRotatef(elapsed*s.spinRate,0,1,0); DrawSubobject(s); glPopMatrix(); } }
 
 @interface SpaceGLView : NSOpenGLView
 - (instancetype)initWithFrame:(NSRect)frame scene:(SceneDefinition *)scene;
@@ -84,7 +102,7 @@ static void DrawMesh(POFMesh *m){ const V3 *v=(const V3*)m.verts.bytes; const ui
         glPushMatrix(); glTranslatef(p.x,p.y,p.z);
         POFMesh *mesh=[_meshCache objectForKey:m.pofPath]; if((id)mesh==[NSNull null]) mesh=nil;
         if(!mesh && ![_meshCache objectForKey:m.pofPath]){ NSString *err=nil; mesh=LoadPOFDetail0(m.pofPath,&err); if(mesh) [_meshCache setObject:mesh forKey:m.pofPath]; else [_meshCache setObject:[NSNull null] forKey:m.pofPath]; if(![_loggedPOFs containsObject:m.pofPath]){ NSLog(@"[POF] %@ -> %@", m.pofPath, err); [_loggedPOFs addObject:m.pofPath]; }}
-        if(mesh){ glRotatef(_elapsed*mesh.spinRate,0,1,0); glColor3f(0.6,0.8,1); DrawMesh(mesh); }
+        if(mesh){ glColor3f(0.6,0.8,1); DrawMesh(mesh,_elapsed); }
         else { glColor3f(1,0.1,0.1); DrawCube(12.f); }
         glPopMatrix();
         if(_scene.showLoops && m.hasOvalPath && m.ovalRadius>0){ glColor3f(1,0,0); glLineWidth(3); glBegin(GL_LINE_LOOP); for(int i=0;i<96;i++){ float a=DegToRad(360.f*i/96.f); glVertex3f(m.position.x+cosf(a)*m.ovalRadius,m.position.y,m.position.z+sinf(a)*m.ovalRadius);} glEnd(); }
