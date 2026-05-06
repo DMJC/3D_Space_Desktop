@@ -42,6 +42,7 @@ typedef struct { float x,y,z; } V3;
 @property(nonatomic,strong) NSMutableData *tris;  // uint16 idx triplets
 @property(nonatomic) BOOL rotates;
 @property(nonatomic) float spinRate;
+@property(nonatomic,copy) NSString *textureName;
 @end
 @implementation POFSubobject @end
 
@@ -52,6 +53,11 @@ typedef struct { float x,y,z; } V3;
 
 static uint32_t ReadU32(const uint8_t *b){ return (uint32_t)b[0]|((uint32_t)b[1]<<8)|((uint32_t)b[2]<<16)|((uint32_t)b[3]<<24); }
 static float ReadF32(const uint8_t *b){ float f; memcpy(&f,b,4); return f; }
+
+
+static GLuint CheckerTexture(void){ unsigned char px[16]={255,255,255,255,20,20,20,255,20,20,20,255,255,255,255,255}; GLuint t; glGenTextures(1,&t); glBindTexture(GL_TEXTURE_2D,t); glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,2,2,0,GL_RGBA,GL_UNSIGNED_BYTE,px); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR); return t; }
+static GLuint LoadTextureFromPath(NSString *path){ NSImage *img=[[NSImage alloc] initWithContentsOfFile:path]; if(!img) return CheckerTexture(); NSBitmapImageRep *rep=nil; for(NSImageRep *r in [img representations]) if([r isKindOfClass:[NSBitmapImageRep class]]){ rep=(NSBitmapImageRep*)r; break; } if(!rep) return CheckerTexture(); GLuint t; glGenTextures(1,&t); glBindTexture(GL_TEXTURE_2D,t); glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,[rep pixelsWide],[rep pixelsHigh],0,GL_RGBA,GL_UNSIGNED_BYTE,[rep bitmapData]); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR); return t; }
+static NSString *ReadTextureName(const uint8_t *b, NSUInteger len){ NSMutableString *m=[NSMutableString string]; for(NSUInteger i=0;i<len;i++){ unsigned char c=b[i]; if(c==0) break; if((c>31&&c<127) || c=='_'||c=='.') [m appendFormat:@"%c",c]; } return m.length?m:nil; }
 
 static POFMesh *LoadPOFDetail0(NSString *path, NSString **errorMsg) {
     NSData *d=[NSData dataWithContentsOfFile:path]; if(!d || d.length<16){ if(errorMsg)*errorMsg=@"file missing/unreadable"; return nil; }
@@ -68,6 +74,7 @@ static POFMesh *LoadPOFDetail0(NSString *path, NSString **errorMsg) {
                 if(memcmp(b+j,"D0V0",4)==0 && j+8<=end){ uint32_t c=ReadU32(b+j+4); NSUInteger off=j+8; if(off+c*12<=end){ for(uint32_t n=0;n<c;n++){ V3 v={ReadF32(b+off+n*12),ReadF32(b+off+n*12+4),ReadF32(b+off+n*12+8)}; [so.verts appendBytes:&v length:sizeof(V3)]; } } }
                 if(memcmp(b+j,"D0I0",4)==0 && j+8<=end){ uint32_t t=ReadU32(b+j+4); NSUInteger off=j+8; if(off+t*6<=end) [so.tris appendBytes:b+off length:t*6]; }
                 if(memcmp(b+j,"SPIN",4)==0 && j+8<=end){ so.rotates=YES; so.spinRate=ReadF32(b+j+4); }
+                if(memcmp(b+j,"TXTR",4)==0 && j+8<=end){ uint32_t tl=ReadU32(b+j+4); NSUInteger to=j+8; if(to+tl<=end) so.textureName=ReadTextureName(b+to,tl); }
                 j++;
             }
             if(so.verts.length>0 && so.tris.length>0) [mesh.subobjects addObject:so];
@@ -82,14 +89,14 @@ static POFMesh *LoadPOFDetail0(NSString *path, NSString **errorMsg) {
 }
 
 static void DrawCube(float s){ float h=s*0.5f; glBegin(GL_QUADS); glVertex3f(-h,-h,h);glVertex3f(h,-h,h);glVertex3f(h,h,h);glVertex3f(-h,h,h); glVertex3f(-h,-h,-h);glVertex3f(-h,h,-h);glVertex3f(h,h,-h);glVertex3f(h,-h,-h); glVertex3f(-h,h,-h);glVertex3f(-h,h,h);glVertex3f(h,h,h);glVertex3f(h,h,-h); glVertex3f(-h,-h,-h);glVertex3f(h,-h,-h);glVertex3f(h,-h,h);glVertex3f(-h,-h,h); glVertex3f(h,-h,-h);glVertex3f(h,h,-h);glVertex3f(h,h,h);glVertex3f(h,-h,h); glVertex3f(-h,-h,-h);glVertex3f(-h,-h,h);glVertex3f(-h,h,h);glVertex3f(-h,h,-h); glEnd(); }
-static void DrawSubobject(POFSubobject *s){ const V3 *v=(const V3*)s.verts.bytes; const uint16_t *idx=(const uint16_t*)s.tris.bytes; NSUInteger tc=s.tris.length/6; glBegin(GL_TRIANGLES); for(NSUInteger t=0;t<tc;t++){ for(int k=0;k<3;k++){ uint16_t ii=idx[t*3+k]; if(ii<s.verts.length/sizeof(V3)) glVertex3f(v[ii].x,v[ii].y,v[ii].z); }} glEnd(); }
+static void DrawSubobject(POFSubobject *s){ const V3 *v=(const V3*)s.verts.bytes; const uint16_t *idx=(const uint16_t*)s.tris.bytes; NSUInteger tc=s.tris.length/6; glBegin(GL_TRIANGLES); for(NSUInteger t=0;t<tc;t++){ for(int k=0;k<3;k++){ uint16_t ii=idx[t*3+k]; if(ii<s.verts.length/sizeof(V3)){ V3 p=v[ii]; glTexCoord2f((p.x+50.f)/100.f,(p.z+50.f)/100.f); glVertex3f(p.x,p.y,p.z);} }} glEnd(); }
 static void DrawMesh(POFMesh *m,float elapsed){ for(POFSubobject *s in m.subobjects){ glPushMatrix(); if(s.rotates) glRotatef(elapsed*s.spinRate,0,1,0); DrawSubobject(s); glPopMatrix(); } }
 
 @interface SpaceGLView : NSOpenGLView
 - (instancetype)initWithFrame:(NSRect)frame scene:(SceneDefinition *)scene;
 @end
-@implementation SpaceGLView { SceneDefinition *_scene; NSTimer *_timer; NSTimeInterval _last; float _elapsed; NSMutableDictionary *_meshCache; NSMutableSet *_loggedPOFs; NSMutableData *_stars; }
-- (instancetype)initWithFrame:(NSRect)frame scene:(SceneDefinition *)scene { NSOpenGLPixelFormatAttribute attrs[]={NSOpenGLPFADoubleBuffer,NSOpenGLPFAColorSize,24,NSOpenGLPFADepthSize,24,0}; if((self=[super initWithFrame:frame pixelFormat:[[NSOpenGLPixelFormat alloc] initWithAttributes:attrs]])){ _scene=scene; _last=[NSDate timeIntervalSinceReferenceDate]; _timer=[NSTimer scheduledTimerWithTimeInterval:1.0/60.0 target:self selector:@selector(onTick:) userInfo:nil repeats:YES]; _meshCache=[NSMutableDictionary dictionary]; _loggedPOFs=[NSMutableSet set]; _stars=[NSMutableData dataWithLength:sizeof(V3)*1500]; V3 *s=(V3*)_stars.mutableBytes; for(int i=0;i<1500;i++){ s[i]=(V3){((float)arc4random()/UINT32_MAX-0.5f)*3000.f,((float)arc4random()/UINT32_MAX-0.5f)*3000.f,-((float)arc4random()/UINT32_MAX)*3000.f}; }} return self; }
+@implementation SpaceGLView { SceneDefinition *_scene; NSTimer *_timer; NSTimeInterval _last; float _elapsed; NSMutableDictionary *_meshCache; NSMutableSet *_loggedPOFs; NSMutableData *_stars; NSMutableDictionary *_textureCache; }
+- (instancetype)initWithFrame:(NSRect)frame scene:(SceneDefinition *)scene { NSOpenGLPixelFormatAttribute attrs[]={NSOpenGLPFADoubleBuffer,NSOpenGLPFAColorSize,24,NSOpenGLPFADepthSize,24,0}; if((self=[super initWithFrame:frame pixelFormat:[[NSOpenGLPixelFormat alloc] initWithAttributes:attrs]])){ _scene=scene; _last=[NSDate timeIntervalSinceReferenceDate]; _timer=[NSTimer scheduledTimerWithTimeInterval:1.0/60.0 target:self selector:@selector(onTick:) userInfo:nil repeats:YES]; _meshCache=[NSMutableDictionary dictionary]; _loggedPOFs=[NSMutableSet set]; _stars=[NSMutableData dataWithLength:sizeof(V3)*1500]; _textureCache=[NSMutableDictionary dictionary]; V3 *s=(V3*)_stars.mutableBytes; for(int i=0;i<1500;i++){ s[i]=(V3){((float)arc4random()/UINT32_MAX-0.5f)*3000.f,((float)arc4random()/UINT32_MAX-0.5f)*3000.f,-((float)arc4random()/UINT32_MAX)*3000.f}; }} return self; }
 - (void)onTick:(NSTimer*)t { (void)t; [self display]; }
 - (BOOL)acceptsFirstResponder { return YES; }
 - (void)keyDown:(NSEvent *)e { NSString *c=[e charactersIgnoringModifiers]; if(c.length && [c characterAtIndex:0]==27){ [NSApp terminate:nil]; return; } [super keyDown:e]; }
@@ -102,7 +109,7 @@ static void DrawMesh(POFMesh *m,float elapsed){ for(POFSubobject *s in m.subobje
         glPushMatrix(); glTranslatef(p.x,p.y,p.z);
         POFMesh *mesh=[_meshCache objectForKey:m.pofPath]; if((id)mesh==[NSNull null]) mesh=nil;
         if(!mesh && ![_meshCache objectForKey:m.pofPath]){ NSString *err=nil; mesh=LoadPOFDetail0(m.pofPath,&err); if(mesh) [_meshCache setObject:mesh forKey:m.pofPath]; else [_meshCache setObject:[NSNull null] forKey:m.pofPath]; if(![_loggedPOFs containsObject:m.pofPath]){ NSLog(@"[POF] %@ -> %@", m.pofPath, err); [_loggedPOFs addObject:m.pofPath]; }}
-        if(mesh){ glColor3f(0.6,0.8,1); DrawMesh(mesh,_elapsed); }
+        if(mesh){ glEnable(GL_TEXTURE_2D); for(POFSubobject *so in mesh.subobjects){ NSString *name=so.textureName; GLuint tex=0; if(name.length){ id c=_textureCache[name]; if(c) tex=[c unsignedIntValue]; else { NSString *base=[_scene.textureRoot stringByAppendingPathComponent:name]; NSArray *exts=@[@"png",@"dds",@"pcx"]; NSString *found=nil; for(NSString *e in exts){ NSString *p=[base stringByAppendingPathExtension:e]; if([[NSFileManager defaultManager] fileExistsAtPath:p]){ found=p; break; } } tex=LoadTextureFromPath(found?:base); _textureCache[name]=@(tex); NSLog(@"[TEX] %@ -> %@", name, found?:@"fallback"); } } else { tex=CheckerTexture(); } glBindTexture(GL_TEXTURE_2D,tex); if(so.rotates) glPushMatrix(), glRotatef(_elapsed*so.spinRate,0,1,0), DrawSubobject(so), glPopMatrix(); else DrawSubobject(so); } glDisable(GL_TEXTURE_2D); }
         else { glColor3f(1,0.1,0.1); DrawCube(12.f); }
         glPopMatrix();
         if(_scene.showLoops && m.hasOvalPath && m.ovalRadius>0){ glColor3f(1,0,0); glLineWidth(3); glBegin(GL_LINE_LOOP); for(int i=0;i<96;i++){ float a=DegToRad(360.f*i/96.f); glVertex3f(m.position.x+cosf(a)*m.ovalRadius,m.position.y,m.position.z+sinf(a)*m.ovalRadius);} glEnd(); }
