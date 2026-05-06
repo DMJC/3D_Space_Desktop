@@ -1,0 +1,7 @@
+# Example scene
+camera=0,10,40
+textureRoot=./textures
+skybox=nebula
+showLoops=true
+model=./assets/fighter.pof,0,0,0,ovalpath=true,radius=20,speed=20,offset=0
+model=./assets/missing_ship.pof,35,0,5
