@@ -36,16 +36,16 @@ static POFMesh *LoadPOFDetail0(NSString *path, NSString **err){ NSData *d=[NSDat
     }
     POFMesh *m=[POFMesh new]; m.subs=[NSMutableArray array];
     if(detail.count>0){
-        int root=[detail[0] intValue];
+        int root=(detail.count>1)?[detail[1] intValue]:[detail[0] intValue];
         for(NSNumber *k in objById){ POFSub *s=objById[k]; if(s.sid==root || s.parent==root || [detail containsObject:@(s.sid)]) [m.subs addObject:s]; }
-        if(m.subs.count>0){ if(err)*err=[NSString stringWithFormat:@"detail0 subobjects=%lu",(unsigned long)m.subs.count]; return m; }
+        if(m.subs.count>0){ if(err)*err=[NSString stringWithFormat:@"lod1 subobjects=%lu",(unsigned long)m.subs.count]; return m; }
     }
-    // Fallback when detail0 is missing: use top-level models + direct submodels.
+    // Fallback when LOD1 is missing: use top-level models + direct submodels.
     int top=INT_MAX;
     for(NSNumber *k in objById){ POFSub *s=objById[k]; if(s.parent<0 && s.sid<top) top=s.sid; }
     for(NSNumber *k in objById){ POFSub *s=objById[k]; if(s.parent<0 || s.parent==top) [m.subs addObject:s]; }
     if(m.subs.count==0){ if(err)*err=@"no drawable subobjects"; return nil; }
-    if(err)*err=[NSString stringWithFormat:@"detail0 missing, fallback subobjects=%lu",(unsigned long)m.subs.count]; return m;
+    if(err)*err=[NSString stringWithFormat:@"lod1 missing, fallback subobjects=%lu",(unsigned long)m.subs.count]; return m;
 }
 
 static GLuint CheckerTexture(void){ unsigned char p[16]={255,255,255,255,20,20,20,255,20,20,20,255,255,255,255,255}; GLuint t; glGenTextures(1,&t); glBindTexture(GL_TEXTURE_2D,t); glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,2,2,0,GL_RGBA,GL_UNSIGNED_BYTE,p); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR); return t; }
