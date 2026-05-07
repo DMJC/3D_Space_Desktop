@@ -1,0 +1,10 @@
+# Example scene
+camera=600,1000,5000
+textureRoot=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/maps/
+skybox=nebula
+showLoops=false
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Babylon4.pof,0,0,0,rotx=-20,roty=30,rotz=0,ovalpath=false,radius=0,speed=0,offset=0,rotsync=1,rotrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/MF_Tinashi.pof,0,-550,0,0,0,0,ovalpath=true,radius=4510,speed=5,offset=0,ovalrotx=0,ovalroty=180,ovalrotz=40,ovalrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/MF_Tinashi.pof,0,0,0,0,0,0,ovalpath=true,radius=4520,speed=5,offset=0,ovalrotx=0,ovalroty=180,ovalrotz=40,ovalrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/MF_Tinashi.pof,0,550,0,0,0,0,ovalpath=true,radius=4510,speed=5,offset=0,ovalrotx=0,ovalroty=180,ovalrotz=40,ovalrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/ISA_Whitestar.pof,1000,7100,-3000,0,0,0,ovalpath=true,radius=8000,speed=25,offset=0,ovalrotx=40,ovalroty=0,ovalrotz=-10,ovalrev=0

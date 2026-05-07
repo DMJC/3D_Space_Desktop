@@ -109,6 +109,9 @@ static NSString *Str(const uint8_t *b, NSUInteger n)
 @property(nonatomic) float ovalSpeedDegPerSec;
 @property(nonatomic) float ovalAngleOffset;
 @property(nonatomic) Vec3 ovalPlaneRot;
+@property(nonatomic) BOOL ovalRev;
+@property(nonatomic) BOOL rotSync;
+@property(nonatomic) BOOL rotRev;
 @end
 
 @implementation SceneModel
@@ -234,6 +237,12 @@ static NSString *Str(const uint8_t *b, NSUInteger n)
                     m.ovalPlaneRot = (Vec3){m.ovalPlaneRot.x, [kv[1] floatValue], m.ovalPlaneRot.z};
                 else if([kv[0] isEqualToString:@"ovalrotz"])
                     m.ovalPlaneRot = (Vec3){m.ovalPlaneRot.x, m.ovalPlaneRot.y, [kv[1] floatValue]};
+                else if([kv[0] isEqualToString:@"ovalrev"])
+                    m.ovalRev = [kv[1] intValue] != 0;
+                else if([kv[0] isEqualToString:@"rotsync"])
+                    m.rotSync = [kv[1] intValue] != 0;
+                else if([kv[0] isEqualToString:@"rotrev"])
+                    m.rotRev = [kv[1] intValue] != 0;
             }
 
             [s.models addObject:m];
@@ -1527,7 +1536,7 @@ static void DrawAxes(float len)
 
 @interface SpaceGLView : NSOpenGLView
 - (instancetype)initWithFrame:(NSRect)f scene:(SceneDefinition *)s;
-- (void)drawSubobject:(POFSub *)s mesh:(POFMesh *)pm children:(NSDictionary *)children elapsed:(float)elapsed;
+- (void)drawSubobject:(POFSub *)s mesh:(POFMesh *)pm children:(NSDictionary *)children elapsed:(float)elapsed reversedSubs:(NSSet *)reversedSubs;
 @end
 
 @implementation SpaceGLView
@@ -1765,7 +1774,7 @@ static void DrawAxes(float len)
     return m;
 }
 
-- (void)drawSubobject:(POFSub *)s mesh:(POFMesh *)pm children:(NSDictionary *)children elapsed:(float)elapsed
+- (void)drawSubobject:(POFSub *)s mesh:(POFMesh *)pm children:(NSDictionary *)children elapsed:(float)elapsed reversedSubs:(NSSet *)reversedSubs
 {
     glPushMatrix();
 
@@ -1776,7 +1785,8 @@ static void DrawAxes(float len)
     // children inherit this branch transform, but sibling/root subobjects do not.
     if(s.rotates)
     {
-        float angle = elapsed * s.spin;
+        BOOL rev = reversedSubs && [reversedSubs containsObject:@(s.sid)];
+        float angle = (rev ? -1.0f : 1.0f) * elapsed * s.spin;
 
         switch(s.movementAxis)
         {
@@ -1844,7 +1854,7 @@ static void DrawAxes(float len)
 
     NSArray *kids = children[@(s.sid)];
     for(POFSub *child in kids)
-        [self drawSubobject:child mesh:pm children:children elapsed:elapsed];
+        [self drawSubobject:child mesh:pm children:children elapsed:elapsed reversedSubs:reversedSubs];
 
     glPopMatrix();
 }
@@ -1976,10 +1986,19 @@ static void DrawAxes(float len)
         if(m.hasOvalPath && m.ovalRadius > 0)
         {
             float a = DegToRad(m.ovalAngleOffset + _e * m.ovalSpeedDegPerSec);
-
-            Vec3 localOrbit   = {cosf(a) * m.ovalRadius, 0.0f, sinf(a) * m.ovalRadius};
-            Vec3 localTangent = {-sinf(a), 0.0f, cosf(a)};
-            Vec3 localUp      = {0.0f, 1.0f, 0.0f};
+            Vec3 localOrbit, localTangent;
+            if(m.ovalRev)
+            {
+                // Mirror Z: orbit travels clockwise; tangent is d/da of (cos,0,-sin)
+                localOrbit   = (Vec3){cosf(a) * m.ovalRadius, 0.0f, -sinf(a) * m.ovalRadius};
+                localTangent = (Vec3){-sinf(a), 0.0f, -cosf(a)};
+            }
+            else
+            {
+                localOrbit   = (Vec3){cosf(a) * m.ovalRadius, 0.0f, sinf(a) * m.ovalRadius};
+                localTangent = (Vec3){-sinf(a), 0.0f, cosf(a)};
+            }
+            Vec3 localUp = {0.0f, 1.0f, 0.0f};
 
             Vec3 worldOrbit   = V3RotXYZ(localOrbit,   m.ovalPlaneRot);
             Vec3 worldTangent = V3RotXYZ(localTangent,  m.ovalPlaneRot);
@@ -1989,9 +2008,7 @@ static void DrawAxes(float len)
             p.y += worldOrbit.y;
             p.z += worldOrbit.z;
 
-            // Build orientation matrix so model -Z faces direction of travel.
-            // rotationDeg in scene.txt acts as a model-space correction
-            // (e.g. roty=90 if the model nose isn't along -Z).
+            // Build orientation matrix so model +Z faces direction of travel.
             Vec3 fwd   = V3Normalize(worldTangent);
             Vec3 right = V3Normalize(V3Cross(worldUp, fwd));
             Vec3 up    = V3Cross(fwd, right);
@@ -2054,8 +2071,27 @@ static void DrawAxes(float len)
             if(roots.count == 0 && pm.subs.count > 0)
                 [roots addObject:pm.subs[0]];
 
+            NSSet *reversedSubs = nil;
+            if(m.rotSync)
+            {
+                NSMutableDictionary *axisCount = [NSMutableDictionary dictionary];
+                NSMutableSet *revSet = [NSMutableSet set];
+                for(POFSub *sub in pm.subs)
+                {
+                    if(!sub.rotates) continue;
+                    NSNumber *axis = @(sub.movementAxis);
+                    NSUInteger idx = [axisCount[axis] unsignedIntegerValue];
+                    // Even-indexed rotators on an axis are the "first" group.
+                    // RotRev swaps which group spins in reverse.
+                    BOOL reversed = (idx % 2 == 0) ? (BOOL)m.rotRev : (BOOL)!m.rotRev;
+                    if(reversed) [revSet addObject:@(sub.sid)];
+                    axisCount[axis] = @(idx + 1);
+                }
+                reversedSubs = revSet;
+            }
+
             for(POFSub *root in roots)
-                [self drawSubobject:root mesh:pm children:children elapsed:_e];
+                [self drawSubobject:root mesh:pm children:children elapsed:_e reversedSubs:reversedSubs];
 
             glDisable(GL_TEXTURE_2D);
         }
