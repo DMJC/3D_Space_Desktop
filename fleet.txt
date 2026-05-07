@@ -1,0 +1,10 @@
+# Example scene
+camera=0,0,3000
+textureRoot=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/maps/
+skybox=nebula
+showLoops=true
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Aurora.pof,0,0,7000,0,0,0,ovalpath=true,radius=4510,speed=5,offset=0,ovalrotx=0,ovalroty=0,ovalrotz=0,ovalrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Omega.pof,0,0,7000,0,0,ovalpath=true,radius=4520,speed=5,offset=0,ovalrotx=0,ovalroty=0,ovalrotz=0,ovalrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Aurora.pof,0,-200,7200,0,0,0,ovalpath=true,radius=4610,speed=5,offset=10,ovalrotx=0,ovalroty=0,ovalrotz=0,ovalrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Aurora.pof,0,0,7200,0,0,0,ovalpath=true,radius=4750,speed=5,offset=5,ovalrotx=0,ovalroty=0,ovalrotz=0,ovalrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Aurora.pof,0,200,7200,0,0,0,ovalpath=true,radius=4850,speed=5,offset=15,ovalrotx=0,ovalroty=0,ovalrotz=0,ovalrev=1

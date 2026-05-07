@@ -1,6 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
-#import <GL/gl.h>
+#import <GL/glew.h>
 #import <math.h>
 #import <stdint.h>
 #import <string.h>
@@ -51,6 +51,74 @@ static inline Vec3 V3RotZ(Vec3 v, float deg)
 static inline Vec3 V3RotXYZ(Vec3 v, Vec3 euler)
 {
     return V3RotZ(V3RotY(V3RotX(v, euler.x), euler.y), euler.z);
+}
+
+// Column-major 4x4 float matrix (OpenGL convention)
+typedef struct { float m[16]; } Mat4;
+
+static inline Mat4 Mat4Identity(void)
+{
+    Mat4 r = {{0}};
+    r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f;
+    return r;
+}
+
+static inline Mat4 Mat4Mul(Mat4 a, Mat4 b)
+{
+    Mat4 r;
+    for(int c = 0; c < 4; c++)
+        for(int row = 0; row < 4; row++)
+        {
+            float s = 0;
+            for(int k = 0; k < 4; k++)
+                s += a.m[k*4+row] * b.m[c*4+k];
+            r.m[c*4+row] = s;
+        }
+    return r;
+}
+
+static inline Mat4 Mat4Translate(float x, float y, float z)
+{
+    Mat4 r = Mat4Identity();
+    r.m[12] = x; r.m[13] = y; r.m[14] = z;
+    return r;
+}
+
+static inline Mat4 Mat4RotateX(float deg)
+{
+    float c = cosf(DegToRad(deg)), s = sinf(DegToRad(deg));
+    Mat4 r = Mat4Identity();
+    r.m[5] = c; r.m[6] = s; r.m[9] = -s; r.m[10] = c;
+    return r;
+}
+
+static inline Mat4 Mat4RotateY(float deg)
+{
+    float c = cosf(DegToRad(deg)), s = sinf(DegToRad(deg));
+    Mat4 r = Mat4Identity();
+    r.m[0] = c; r.m[2] = -s; r.m[8] = s; r.m[10] = c;
+    return r;
+}
+
+static inline Mat4 Mat4RotateZ(float deg)
+{
+    float c = cosf(DegToRad(deg)), s = sinf(DegToRad(deg));
+    Mat4 r = Mat4Identity();
+    r.m[0] = c; r.m[1] = s; r.m[4] = -s; r.m[5] = c;
+    return r;
+}
+
+static inline Mat4 Mat4Frustum(float l, float ri, float b, float t, float n, float f)
+{
+    Mat4 mat = {{0}};
+    mat.m[0]  = 2.0f*n/(ri-l);
+    mat.m[5]  = 2.0f*n/(t-b);
+    mat.m[8]  = (ri+l)/(ri-l);
+    mat.m[9]  = (t+b)/(t-b);
+    mat.m[10] = -(f+n)/(f-n);
+    mat.m[11] = -1.0f;
+    mat.m[14] = -2.0f*f*n/(f-n);
+    return mat;
 }
 
 static NSString *NormalizeScenePath(NSString *raw)
@@ -123,6 +191,7 @@ static NSString *Str(const uint8_t *b, NSUInteger n)
 @property(nonatomic, copy) NSString *skyboxName;
 @property(nonatomic) BOOL showLoops;
 @property(nonatomic, strong) NSMutableArray *models;
+@property(nonatomic) Vec3 sunDir;  // normalized direction FROM scene TOWARD sun
 @end
 
 @implementation SceneDefinition
@@ -132,6 +201,7 @@ static NSString *Str(const uint8_t *b, NSUInteger n)
     {
         _cameraPosition = (Vec3){0, 0, 8000};
         _models = [NSMutableArray array];
+        _sunDir = V3Normalize((Vec3){1, 1, 1});
     }
 
     return self;
@@ -192,6 +262,17 @@ static NSString *Str(const uint8_t *b, NSUInteger n)
         else if([k isEqualToString:@"showloops"])
         {
             s.showLoops = [[v lowercaseString] isEqualToString:@"true"];
+        }
+        else if([k isEqualToString:@"sun"])
+        {
+            NSArray *c = [v componentsSeparatedByString:@","];
+            if(c.count >= 3)
+            {
+                Vec3 d = {[c[0] floatValue], [c[1] floatValue], [c[2] floatValue]};
+                float len = sqrtf(d.x*d.x + d.y*d.y + d.z*d.z);
+                if(len > 0.0f)
+                    s.sunDir = (Vec3){d.x/len, d.y/len, d.z/len};
+            }
         }
         else if([k isEqualToString:@"model"])
         {
@@ -262,6 +343,13 @@ typedef struct {
     int texIndex;
 } POFTri;
 
+typedef struct {
+    GLuint   vao;
+    GLuint   vbo;
+    GLsizei  count;
+    int      texIndex;
+} VBOBatch;
+
 @interface POFSub : NSObject
 @property(nonatomic) int sid;
 @property(nonatomic) int parent;
@@ -278,7 +366,10 @@ typedef struct {
 @property(nonatomic) int movementType;
 @property(nonatomic) int movementAxis;
 @property(nonatomic) float spin;
+@property(nonatomic, strong) NSMutableData *vboBatches;
+@property(nonatomic) BOOL vbosBuilt;
 @property(nonatomic, copy) NSString *tex;
+@property(nonatomic, copy) NSString *name;
 @end
 
 @implementation POFSub
@@ -808,6 +899,7 @@ static POFMesh *LoadPOFDetail0(NSString *path, NSString **err)
                 objById[@(s.sid)] = s;
                 continue;
             }
+            s.name = name;
 
             if(!ReadBPOFString(b, &q, end, &props))
             {
@@ -953,6 +1045,33 @@ static POFMesh *LoadPOFDetail0(NSString *path, NSString **err)
     return m;
 }
 
+// Set filtering params on the currently-bound GL_TEXTURE_2D.
+// Generates mipmaps and enables trilinear + anisotropic filtering when available.
+static void ApplyTexParams(void)
+{
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+    if(glGenerateMipmap)
+    {
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+
+        if(GLEW_EXT_texture_filter_anisotropic)
+        {
+            GLfloat maxAniso = 1.0f;
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
+            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT,
+                            fminf(maxAniso, 8.0f));
+        }
+    }
+    else
+    {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    }
+}
+
 static GLuint CheckerTexture(void)
 {
     unsigned char p[16] = {
@@ -964,10 +1083,7 @@ static GLuint CheckerTexture(void)
     glGenTextures(1, &t);
     glBindTexture(GL_TEXTURE_2D, t);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, p);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    ApplyTexParams();
     return t;
 }
 
@@ -1262,11 +1378,7 @@ static GLuint UploadPlainRGBA(NSString *label, NSData *rgba, uint32_t w, uint32_
         return CheckerTexture();
     }
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    ApplyTexParams();
     return tex;
 }
 
@@ -1392,11 +1504,7 @@ static GLuint LoadTexture(NSString *p)
                      GL_UNSIGNED_BYTE,
                      [pcxRGBA bytes]);
 
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        ApplyTexParams();
 
         NSLog(@"[TEX] uploaded PCX %@ %ldx%ld id=%u", p, (long)pcxW, (long)pcxH, t);
         return t;
@@ -1486,38 +1594,12 @@ static GLuint LoadTexture(NSString *p)
                  GL_UNSIGNED_BYTE,
                  [rgba bytes]);
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    ApplyTexParams();
 
     NSLog(@"[TEX] uploaded NSImage %@ %ldx%ld id=%u", p, (long)w, (long)h, t);
     return t;
 }
 
-static void DrawCube(float s)
-{
-    float h = s / 2.0f;
-
-    glBegin(GL_QUADS);
-    glVertex3f(-h, -h,  h);
-    glVertex3f( h, -h,  h);
-    glVertex3f( h,  h,  h);
-    glVertex3f(-h,  h,  h);
-    glEnd();
-}
-
-static void DrawAxes(float len)
-{
-    glDisable(GL_TEXTURE_2D);
-    glBegin(GL_LINES);
-    glColor3f(1, 0, 0); glVertex3f(0, 0, 0); glVertex3f(len, 0, 0);
-    glColor3f(0, 1, 0); glVertex3f(0, 0, 0); glVertex3f(0, len, 0);
-    glColor3f(0, 0, 1); glVertex3f(0, 0, 0); glVertex3f(0, 0, len);
-    glEnd();
-    glColor4f(1, 1, 1, 1);
-}
 
 @interface TextureMaterial : NSObject
 @property(nonatomic) GLuint diffuse;
@@ -1534,9 +1616,163 @@ static void DrawAxes(float len)
 @implementation TextureMaterial
 @end
 
+// ---------------------------------------------------------------------------
+// GL 3.3 Core shaders
+// ---------------------------------------------------------------------------
+
+// Mesh shader: lit rendering with per-vertex face normals, normal map, specular map
+static const char *kMeshVertSrc =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 aPos;\n"
+    "layout(location = 1) in vec3 aNormal;\n"
+    "layout(location = 2) in vec2 aUV;\n"
+    "uniform mat4 uModel;\n"
+    "uniform mat4 uView;\n"
+    "uniform mat4 uProj;\n"
+    "out vec3 vViewPos;\n"
+    "out vec3 vViewNormal;\n"
+    "out vec2 vUV;\n"
+    "void main() {\n"
+    "    vec4 vp    = uView * uModel * vec4(aPos, 1.0);\n"
+    "    vViewPos   = vp.xyz;\n"
+    "    vViewNormal = mat3(uView * uModel) * aNormal;\n"
+    "    vUV        = aUV;\n"
+    "    gl_Position = uProj * vp;\n"
+    "}\n";
+
+static const char *kMeshFragSrc =
+    "#version 330 core\n"
+    "uniform sampler2D uDiffuse;\n"
+    "uniform sampler2D uNormal;\n"
+    "uniform sampler2D uShine;\n"
+    "uniform vec3 uLightDir;\n"
+    "uniform int  uHasNormal;\n"
+    "uniform int  uHasShine;\n"
+    "uniform int  uEmissive;\n"
+    "in vec3 vViewPos;\n"
+    "in vec3 vViewNormal;\n"
+    "in vec2 vUV;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    vec4 base = texture(uDiffuse, vUV);\n"
+    // Emissive / glow pass: no lighting, output texture directly
+    "    if(uEmissive != 0) { fragColor = base; return; }\n"
+    // Base normal from interpolated vertex normal (face normal = flat shading)
+    "    vec3 N = normalize(vViewNormal);\n"
+    "    if(dot(N, -vViewPos) < 0.0) N = -N;\n"
+    // Tangent-space normal map (uses position/UV screen derivatives, stable now that N is vertex-driven)
+    "    if(uHasNormal != 0) {\n"
+    "        vec3 dPdx = dFdx(vViewPos); vec3 dPdy = dFdy(vViewPos);\n"
+    "        vec2 dUVdx = dFdx(vUV);    vec2 dUVdy = dFdy(vUV);\n"
+    "        float det = dUVdx.x * dUVdy.y - dUVdy.x * dUVdx.y;\n"
+    "        if(abs(det) > 1e-6) {\n"
+    "            vec3 T  = normalize(( dUVdy.y * dPdx - dUVdx.y * dPdy) / det);\n"
+    "            vec3 B  = normalize((-dUVdy.x * dPdx + dUVdx.x * dPdy) / det);\n"
+    // DXT5nm (AG): alpha=X, green=Y, Z derived; RGB channels are filler
+    "            vec4 ntex = texture(uNormal, vUV);\n"
+    "            vec3 ns; ns.x = ntex.a*2.0-1.0; ns.y = ntex.g*2.0-1.0;\n"
+    "            ns.z = sqrt(max(0.0, 1.0 - ns.x*ns.x - ns.y*ns.y));\n"
+    "            N = normalize(mat3(T, B, N) * ns);\n"
+    "        }\n"
+    "    }\n"
+    "    float NdotL = max(dot(N, uLightDir), 0.0);\n"
+    "    vec3  V     = normalize(-vViewPos);\n"
+    "    vec3  H     = normalize(uLightDir + V);\n"
+    "    float spec  = pow(max(dot(N, H), 0.0), 32.0);\n"
+    "    if(uHasShine != 0)\n"
+    "        spec *= texture(uShine, vUV).r;\n"
+    "    else\n"
+    "        spec = 0.0;\n"
+    "    vec3 lit = base.rgb * (0.2 + NdotL) + vec3(spec);\n"
+    "    fragColor = vec4(lit, base.a);\n"
+    "}\n";
+
+// Flat shader: unlit geometry with per-vertex colour (stars, axes, orbit loops, placeholders)
+static const char *kFlatVertSrc =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 aPos;\n"
+    "layout(location = 1) in vec4 aColor;\n"
+    "uniform mat4 uMVP;\n"
+    "uniform float uPointSize;\n"
+    "out vec4 vColor;\n"
+    "void main() {\n"
+    "    vColor = aColor;\n"
+    "    gl_Position = uMVP * vec4(aPos, 1.0);\n"
+    "    gl_PointSize = uPointSize;\n"
+    "}\n";
+
+static const char *kFlatFragSrc =
+    "#version 330 core\n"
+    "in vec4 vColor;\n"
+    "uniform vec4 uColorMul;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    fragColor = vColor * uColorMul;\n"
+    "}\n";
+
+static GLuint CompileShader(GLenum type, const char *src)
+{
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, NULL);
+    glCompileShader(s);
+    GLint ok = 0;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if(!ok)
+    {
+        char log[2048] = {0};
+        glGetShaderInfoLog(s, sizeof(log) - 1, NULL, log);
+        NSLog(@"[GLSL] compile error:\n%s", log);
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+static GLuint BuildProgram(const char *vertSrc, const char *fragSrc)
+{
+    GLuint vs = CompileShader(GL_VERTEX_SHADER,   vertSrc);
+    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, fragSrc);
+    if(!vs || !fs) { if(vs) glDeleteShader(vs); if(fs) glDeleteShader(fs); return 0; }
+
+    GLuint p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if(!ok)
+    {
+        char log[2048] = {0};
+        glGetProgramInfoLog(p, sizeof(log) - 1, NULL, log);
+        NSLog(@"[GLSL] link error:\n%s", log);
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+// Build a flat-shader VAO from interleaved [x,y,z,r,g,b,a] float vertices
+static void BuildFlatVAO(const float *verts, GLsizeiptr size, GLuint *vao, GLuint *vbo)
+{
+    glGenVertexArrays(1, vao);
+    glGenBuffers(1, vbo);
+    glBindVertexArray(*vao);
+    glBindBuffer(GL_ARRAY_BUFFER, *vbo);
+    glBufferData(GL_ARRAY_BUFFER, size, verts, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 7*sizeof(float), (void *)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 7*sizeof(float), (void *)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+}
+
 @interface SpaceGLView : NSOpenGLView
 - (instancetype)initWithFrame:(NSRect)f scene:(SceneDefinition *)s;
-- (void)drawSubobject:(POFSub *)s mesh:(POFMesh *)pm children:(NSDictionary *)children elapsed:(float)elapsed reversedSubs:(NSSet *)reversedSubs;
+- (void)drawSubobject:(POFSub *)s mesh:(POFMesh *)pm children:(NSDictionary *)children elapsed:(float)elapsed reversedSubs:(NSSet *)reversedSubs modelMat:(Mat4)modelMat;
 @end
 
 @implementation SpaceGLView
@@ -1552,6 +1788,26 @@ static void DrawAxes(float len)
     NSMutableData *_stars;
     GLuint _skyboxTex;
     BOOL _skyboxLoaded;
+    BOOL _glReady;
+    // Mesh shader
+    GLuint _shader;
+    GLint _uModel, _uView, _uProj;
+    GLint _uDiffuse, _uNormal, _uShine;
+    GLint _uHasNormal, _uHasShine;
+    GLint _uLightDir;
+    GLint _uEmissive;
+    // Flat shader
+    GLuint _flatShader;
+    GLint _uMVP, _uPointSize, _uColorMul;
+    // CPU matrices
+    Mat4 _proj;
+    Mat4 _view;
+    // Static geometry VAOs
+    GLuint _starsVAO, _starsVBO;
+    GLuint _axesVAO, _axesVBO;
+    GLuint _cubeVAO, _cubeVBO;
+    NSMutableArray *_loopVAOs;   // GLuint per _s.models entry (0 = no loop)
+    NSMutableArray *_loopVBOs;
 }
 
 - (instancetype)initWithFrame:(NSRect)f scene:(SceneDefinition *)s
@@ -1622,18 +1878,136 @@ static void DrawAxes(float len)
     [super keyDown:e];
 }
 
-- (void)prepareOpenGL
+- (void)_initGL
 {
-    [super prepareOpenGL];
+    if(_glReady) return;
+    _glReady = YES;
+
+    glewExperimental = GL_TRUE;
+    GLenum glewErr = glewInit();
+    NSLog(@"[GLEW] init=%u GL3=%d version=%s", glewErr, (int)GLEW_VERSION_3_3,
+          (const char *)glGetString(GL_VERSION));
 
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
-    glDisable(GL_LIGHTING);
-    glDisable(GL_CULL_FACE);
-    glShadeModel(GL_SMOOTH);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
     glClearDepth(1.0);
+    glEnable(GL_PROGRAM_POINT_SIZE);
+
+    // Build mesh shader
+    _shader = BuildProgram(kMeshVertSrc, kMeshFragSrc);
+    NSLog(@"[GLSL] mesh program id=%u", _shader);
+    if(_shader)
+    {
+        _uModel     = glGetUniformLocation(_shader, "uModel");
+        _uView      = glGetUniformLocation(_shader, "uView");
+        _uProj      = glGetUniformLocation(_shader, "uProj");
+        _uDiffuse   = glGetUniformLocation(_shader, "uDiffuse");
+        _uNormal    = glGetUniformLocation(_shader, "uNormal");
+        _uShine     = glGetUniformLocation(_shader, "uShine");
+        _uHasNormal = glGetUniformLocation(_shader, "uHasNormal");
+        _uHasShine  = glGetUniformLocation(_shader, "uHasShine");
+        _uLightDir  = glGetUniformLocation(_shader, "uLightDir");
+        _uEmissive  = glGetUniformLocation(_shader, "uEmissive");
+
+        glUseProgram(_shader);
+        glUniform1i(_uDiffuse,  0);
+        glUniform1i(_uNormal,   1);
+        glUniform1i(_uShine,    2);
+        glUniform1i(_uEmissive, 0);
+        glUseProgram(0);
+    }
+
+    // Build flat shader
+    _flatShader = BuildProgram(kFlatVertSrc, kFlatFragSrc);
+    NSLog(@"[GLSL] flat program id=%u", _flatShader);
+    if(_flatShader)
+    {
+        _uMVP       = glGetUniformLocation(_flatShader, "uMVP");
+        _uPointSize = glGetUniformLocation(_flatShader, "uPointSize");
+        _uColorMul  = glGetUniformLocation(_flatShader, "uColorMul");
+    }
+
+    // Stars VAO — 1500 white point vertices
+    {
+        V3 *st = (V3 *)_stars.bytes;
+        float sv[1500 * 7];
+        for(int i = 0; i < 1500; i++)
+        {
+            sv[i*7+0] = st[i].x; sv[i*7+1] = st[i].y; sv[i*7+2] = st[i].z;
+            sv[i*7+3] = sv[i*7+4] = sv[i*7+5] = sv[i*7+6] = 1.0f;
+        }
+        BuildFlatVAO(sv, sizeof(sv), &_starsVAO, &_starsVBO);
+    }
+
+    // Axes VAO — 3 coloured line segments, fixed length 25
+    {
+        float ax[] = {
+            0,0,0, 1,0,0,1,   25,0,0,  1,0,0,1,
+            0,0,0, 0,1,0,1,   0,25,0,  0,1,0,1,
+            0,0,0, 0,0,1,1,   0,0,25,  0,0,1,1
+        };
+        BuildFlatVAO(ax, sizeof(ax), &_axesVAO, &_axesVBO);
+    }
+
+    // Placeholder cube VAO — unit cube, white vertices, 36 tris
+    {
+        static const float pos[36*3] = {
+            -1,-1,-1, -1,1,-1,  1,1,-1,  -1,-1,-1,  1,1,-1,  1,-1,-1,
+            -1,-1, 1,  1,-1,1,  1,1, 1,  -1,-1, 1,  1,1, 1, -1, 1, 1,
+            -1,-1,-1, -1,-1,1, -1,1, 1,  -1,-1,-1, -1,1, 1, -1, 1,-1,
+             1,-1,-1,  1,1, 1,  1,-1,1,   1,-1,-1,  1,1,-1,  1, 1, 1,
+            -1,-1,-1,  1,-1,1,  1,-1,-1, -1,-1,-1, -1,-1,1,  1,-1,1,
+            -1, 1,-1, -1,1, 1,  1,1, 1,  -1, 1,-1,  1,1, 1,  1, 1,-1
+        };
+        float cv[36*7];
+        for(int i = 0; i < 36; i++)
+        {
+            cv[i*7+0]=pos[i*3]; cv[i*7+1]=pos[i*3+1]; cv[i*7+2]=pos[i*3+2];
+            cv[i*7+3]=cv[i*7+4]=cv[i*7+5]=cv[i*7+6]=1.0f;
+        }
+        BuildFlatVAO(cv, sizeof(cv), &_cubeVAO, &_cubeVBO);
+    }
+
+    // Orbit loop VAOs — one per scene model that has a path
+    _loopVAOs = [[NSMutableArray alloc] init];
+    _loopVBOs = [[NSMutableArray alloc] init];
+    for(SceneModel *m in _s.models)
+    {
+        if(!m.hasOvalPath || m.ovalRadius <= 0)
+        {
+            [_loopVAOs addObject:@(0u)];
+            [_loopVBOs addObject:@(0u)];
+            continue;
+        }
+        float lv[64 * 7];
+        for(int i = 0; i < 64; i++)
+        {
+            float a = DegToRad(360.0f * (float)i / 64.0f);
+            Vec3 pt = V3RotXYZ((Vec3){cosf(a)*m.ovalRadius, 0.0f, sinf(a)*m.ovalRadius},
+                               m.ovalPlaneRot);
+            lv[i*7+0] = m.position.x + pt.x;
+            lv[i*7+1] = m.position.y + pt.y;
+            lv[i*7+2] = m.position.z + pt.z;
+            lv[i*7+3] = 1.0f; lv[i*7+4] = 0.2f; lv[i*7+5] = 0.2f; lv[i*7+6] = 1.0f;
+        }
+        GLuint lVAO = 0, lVBO = 0;
+        BuildFlatVAO(lv, sizeof(lv), &lVAO, &lVBO);
+        [_loopVAOs addObject:@(lVAO)];
+        [_loopVBOs addObject:@(lVBO)];
+    }
 
     [self reshape];
+}
+
+- (void)prepareOpenGL
+{
+    [super prepareOpenGL];
+    // Do NOT call _initGL here — on GNUstep, prepareOpenGL fires before the
+    // context is made current, so glewInit() would bind nothing.  _initGL is
+    // called lazily from drawRect: after makeCurrentContext succeeds.
 }
 
 - (void)reshape
@@ -1646,18 +2020,13 @@ static void DrawAxes(float len)
 
     glViewport(0, 0, (GLsizei)b.size.width, (GLsizei)b.size.height);
 
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-
     float asp = (float)b.size.width / (float)b.size.height;
     float n = VIEW_NEAR_PLANE;
     float f = VIEW_FAR_PLANE;
     float top = tanf(DegToRad(VIEW_FOV_Y_DEG * 0.5f)) * n;
     float right = top * asp;
 
-    glFrustum(-right, right, -top, top, n, f);
-
-    glMatrixMode(GL_MODELVIEW);
+    _proj = Mat4Frustum(-right, right, -top, top, n, f);
 }
 
 - (NSString *)textureFileForName:(NSString *)tn
@@ -1774,89 +2143,186 @@ static void DrawAxes(float len)
     return m;
 }
 
-- (void)drawSubobject:(POFSub *)s mesh:(POFMesh *)pm children:(NSDictionary *)children elapsed:(float)elapsed reversedSubs:(NSSet *)reversedSubs
+- (void)buildVBOsForSub:(POFSub *)s mesh:(POFMesh *)pm
 {
-    glPushMatrix();
-
-    // POF subobject offsets are relative to the parent subobject.
-    glTranslatef(s.offset.x, s.offset.y, s.offset.z);
-
-    // Rotation is local to this subobject only. Because this method recurses,
-    // children inherit this branch transform, but sibling/root subobjects do not.
-    if(s.rotates)
-    {
-        BOOL rev = reversedSubs && [reversedSubs containsObject:@(s.sid)];
-        float angle = (rev ? -1.0f : 1.0f) * elapsed * s.spin;
-
-        switch(s.movementAxis)
-        {
-            case 0: glRotatef(angle, 1, 0, 0); break;
-            case 1: glRotatef(angle, 0, 0, 1); break;
-            case 2: glRotatef(angle, 0, 1, 0); break;
-            default: glRotatef(angle, 0, 1, 0); break;
-        }
-    }
+    s.vbosBuilt = YES;
 
     const POFTri *tri = (const POFTri *)s.tris.bytes;
     NSUInteger triCount = s.tris.length / sizeof(POFTri);
 
-    if(triCount > 0)
+    if(triCount == 0) { s.vboBatches = [NSMutableData data]; return; }
+
+    NSMutableArray *order = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
+    for(NSUInteger t = 0; t < triCount; t++)
     {
+        NSNumber *k = @(tri[t].texIndex);
+        if(![seen containsObject:k]) { [seen addObject:k]; [order addObject:k]; }
+    }
+
+    NSMutableData *batches = [NSMutableData data];
+
+    for(NSNumber *key in order)
+    {
+        int texIdx = key.intValue;
+
+        // Vertex layout: [x,y,z, nx,ny,nz, u,v] — 8 floats, face normal per triangle
+        NSMutableData *verts = [NSMutableData data];
         for(NSUInteger t = 0; t < triCount; t++)
         {
-            NSString *polyTexName = s.tex ?: @"";
+            if(tri[t].texIndex != texIdx) continue;
 
-            if(tri[t].texIndex >= 0 && tri[t].texIndex < (int)pm.textures.count)
-                polyTexName = pm.textures[(NSUInteger)tri[t].texIndex];
+            // Face normal from cross product of the two edges
+            float ex = tri[t].p[1].x - tri[t].p[0].x;
+            float ey = tri[t].p[1].y - tri[t].p[0].y;
+            float ez = tri[t].p[1].z - tri[t].p[0].z;
+            float fx = tri[t].p[2].x - tri[t].p[0].x;
+            float fy = tri[t].p[2].y - tri[t].p[0].y;
+            float fz = tri[t].p[2].z - tri[t].p[0].z;
+            float nx = ey*fz - ez*fy;
+            float ny = ez*fx - ex*fz;
+            float nz = ex*fy - ey*fx;
+            float nl = sqrtf(nx*nx + ny*ny + nz*nz);
+            if(nl > 1e-10f) { nx/=nl; ny/=nl; nz/=nl; }
 
-            TextureMaterial *mat = [self materialForName:polyTexName];
-            glEnable(GL_TEXTURE_2D);
-            glBindTexture(GL_TEXTURE_2D, mat.diffuse);
-            glColor4f(1, 1, 1, 1);
-
-            glBegin(GL_TRIANGLES);
             for(int k = 0; k < 3; k++)
             {
-                glTexCoord2f(tri[t].uv[k][0], tri[t].uv[k][1]);
-                glVertex3f(tri[t].p[k].x, tri[t].p[k].y, tri[t].p[k].z);
+                float v[8] = {
+                    tri[t].p[k].x, tri[t].p[k].y, tri[t].p[k].z,
+                    nx, ny, nz,
+                    tri[t].uv[k][0], tri[t].uv[k][1]
+                };
+                [verts appendBytes:v length:sizeof(v)];
             }
-            glEnd();
+        }
+
+        const GLsizei stride = 8 * sizeof(float);
+        GLuint vao = 0, vbo = 0;
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)verts.length, verts.bytes, GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);                 // aPos
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void *)(3*sizeof(float))); // aNormal
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void *)(6*sizeof(float))); // aUV
+        glEnableVertexAttribArray(2);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+
+        VBOBatch b;
+        b.vao = vao; b.vbo = vbo;
+        b.count    = (GLsizei)(verts.length / (NSUInteger)stride);
+        b.texIndex = texIdx;
+        [batches appendBytes:&b length:sizeof(b)];
+    }
+
+    s.vboBatches = batches;
+}
+
+- (void)drawSubobject:(POFSub *)s
+                 mesh:(POFMesh *)pm
+             children:(NSDictionary *)children
+              elapsed:(float)elapsed
+         reversedSubs:(NSSet *)reversedSubs
+             modelMat:(Mat4)modelMat
+{
+    if([s.name rangeOfString:@"debris"  options:NSCaseInsensitiveSearch].location != NSNotFound ||
+       [s.name rangeOfString:@"destroy" options:NSCaseInsensitiveSearch].location != NSNotFound)
+        return;
+
+    Mat4 subMat = Mat4Mul(modelMat, Mat4Translate(s.offset.x, s.offset.y, s.offset.z));
+
+    if(s.rotates)
+    {
+        BOOL rev = reversedSubs && [reversedSubs containsObject:@(s.sid)];
+        float angle = (rev ? -1.0f : 1.0f) * elapsed * s.spin;
+        Mat4 rot;
+        switch(s.movementAxis)
+        {
+            case 0:  rot = Mat4RotateX(angle); break;
+            case 1:  rot = Mat4RotateZ(angle); break;
+            case 2:  rot = Mat4RotateY(angle); break;
+            default: rot = Mat4RotateY(angle); break;
+        }
+        subMat = Mat4Mul(subMat, rot);
+    }
+
+    if(!s.vbosBuilt)
+        [self buildVBOsForSub:s mesh:pm];
+
+    NSUInteger batchCount = s.vboBatches.length / sizeof(VBOBatch);
+
+    if(batchCount > 0)
+    {
+        const VBOBatch *batches = (const VBOBatch *)s.vboBatches.bytes;
+
+        glUseProgram(_shader);
+        glUniformMatrix4fv(_uModel, 1, GL_FALSE, subMat.m);
+
+        for(NSUInteger b = 0; b < batchCount; b++)
+        {
+            const VBOBatch *batch = &batches[b];
+
+            NSString *polyTexName = s.tex ?: @"";
+            if(batch->texIndex >= 0 && batch->texIndex < (int)pm.textures.count)
+                polyTexName = pm.textures[(NSUInteger)batch->texIndex];
+
+            TextureMaterial *mat = [self materialForName:polyTexName];
+
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, mat.diffuse);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, mat.normal ? mat.normal : mat.diffuse);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, mat.shine  ? mat.shine  : mat.diffuse);
+            glActiveTexture(GL_TEXTURE0);
+            glUniform1i(_uHasNormal, mat.normal != 0);
+            glUniform1i(_uHasShine,  mat.shine  != 0);
+
+            glBindVertexArray(batch->vao);
+            glDrawArrays(GL_TRIANGLES, 0, batch->count);
 
             if(mat.glow)
             {
                 glEnable(GL_BLEND);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE);
                 glDepthMask(GL_FALSE);
+                glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, mat.glow);
-                glColor4f(1, 1, 1, 1);
-
-                glBegin(GL_TRIANGLES);
-                for(int k = 0; k < 3; k++)
-                {
-                    glTexCoord2f(tri[t].uv[k][0], tri[t].uv[k][1]);
-                    glVertex3f(tri[t].p[k].x, tri[t].p[k].y, tri[t].p[k].z);
-                }
-                glEnd();
-
+                glUniform1i(_uEmissive, 1);
+                glDrawArrays(GL_TRIANGLES, 0, batch->count);
+                glUniform1i(_uEmissive, 0);
                 glDepthMask(GL_TRUE);
                 glDisable(GL_BLEND);
             }
         }
+
+        glBindVertexArray(0);
+        glUseProgram(0);
     }
     else
     {
-        glDisable(GL_TEXTURE_2D);
-        glColor3f(1, 0, 1);
-        DrawCube(4.0f);
-        glEnable(GL_TEXTURE_2D);
-        glColor4f(1, 1, 1, 1);
+        // No geometry — draw magenta placeholder cube
+        Mat4 mvp = Mat4Mul(_proj, Mat4Mul(_view, subMat));
+        glUseProgram(_flatShader);
+        glUniformMatrix4fv(_uMVP, 1, GL_FALSE, mvp.m);
+        glUniform1f(_uPointSize, 1.0f);
+        glUniform4f(_uColorMul, 1, 0, 1, 1);
+        glDisable(GL_CULL_FACE);
+        glBindVertexArray(_cubeVAO);
+        glDrawArrays(GL_TRIANGLES, 0, 36);
+        glBindVertexArray(0);
+        glEnable(GL_CULL_FACE);
+        glUseProgram(0);
     }
 
     NSArray *kids = children[@(s.sid)];
     for(POFSub *child in kids)
-        [self drawSubobject:child mesh:pm children:children elapsed:elapsed reversedSubs:reversedSubs];
-
-    glPopMatrix();
+        [self drawSubobject:child mesh:pm children:children elapsed:elapsed
+               reversedSubs:reversedSubs modelMat:subMat];
 }
 
 - (void)drawRect:(NSRect)dirtyRect
@@ -1870,6 +2336,9 @@ static void DrawAxes(float len)
     if(![NSOpenGLContext currentContext])
         return;
 
+    if(!_glReady)
+        [self _initGL];
+
     if(_drawing)
         return;
 
@@ -1882,13 +2351,15 @@ static void DrawAxes(float len)
     glClearColor(0.01f, 0.01f, 0.03f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
+    // View matrix: camera translation only (no rotation support yet)
+    _view = Mat4Translate(-_s.cameraPosition.x,
+                          -_s.cameraPosition.y,
+                          -_s.cameraPosition.z);
 
-    glTranslatef(-_s.cameraPosition.x,
-                 -_s.cameraPosition.y,
-                 -_s.cameraPosition.z);
+    // Pre-compute flat-shader MVP (proj × view, no model transform)
+    Mat4 flatMVP = Mat4Mul(_proj, _view);
 
+    // --- Skybox load (once) ---
     if(!_skyboxLoaded)
     {
         _skyboxLoaded = YES;
@@ -1902,11 +2373,7 @@ static void DrawAxes(float len)
             {
                 NSString *p = [base stringByAppendingPathExtension:ext];
                 NSString *ci = CaseInsensitiveExistingPath(p);
-                if(ci.length)
-                {
-                    fp = ci;
-                    break;
-                }
+                if(ci.length) { fp = ci; break; }
             }
 
             if(!fp && [[NSFileManager defaultManager] fileExistsAtPath:base])
@@ -1919,68 +2386,90 @@ static void DrawAxes(float len)
         }
     }
 
+    // --- Stars (when no skybox) ---
     if(!_skyboxTex)
     {
         glDisable(GL_DEPTH_TEST);
-        glDisable(GL_TEXTURE_2D);
-        glEnable(GL_POINT_SMOOTH);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glColor4f(1, 1, 1, 1);
 
-        V3 *st = (V3 *)_stars.bytes;
+        glUseProgram(_flatShader);
+        glUniformMatrix4fv(_uMVP, 1, GL_FALSE, flatMVP.m);
+        glUniform4f(_uColorMul, 1, 1, 1, 1);
+        glBindVertexArray(_starsVAO);
 
         for(int pass = 0; pass < 3; pass++)
         {
-            glPointSize((float)(pass + 1) * 2.0f);
-            glBegin(GL_POINTS);
-            for(int i = pass * 500; i < (pass + 1) * 500; i++)
-                glVertex3f(st[i].x, st[i].y, st[i].z);
-            glEnd();
+            glUniform1f(_uPointSize, (float)(pass + 1) * 2.0f);
+            glDrawArrays(GL_POINTS, pass * 500, 500);
         }
+
+        glBindVertexArray(0);
+        glUseProgram(0);
 
         glDisable(GL_BLEND);
-        glDisable(GL_POINT_SMOOTH);
         glEnable(GL_DEPTH_TEST);
     }
 
-    DrawAxes(25.0f);
-
-    if(_s.showLoops)
+    // --- Debug axes ---
     {
-        glDisable(GL_TEXTURE_2D);
+        glUseProgram(_flatShader);
+        glUniformMatrix4fv(_uMVP, 1, GL_FALSE, flatMVP.m);
+        glUniform1f(_uPointSize, 1.0f);
+        glUniform4f(_uColorMul, 1, 1, 1, 1);
+        glBindVertexArray(_axesVAO);
+        glDrawArrays(GL_LINES, 0, 6);
+        glBindVertexArray(0);
+        glUseProgram(0);
+    }
+
+    // --- Orbit loops ---
+    if(_s.showLoops && _loopVAOs.count)
+    {
         glDisable(GL_DEPTH_TEST);
-        glColor3f(1, 0, 0);
+        glUseProgram(_flatShader);
+        glUniformMatrix4fv(_uMVP, 1, GL_FALSE, flatMVP.m);
+        glUniform1f(_uPointSize, 1.0f);
+        glUniform4f(_uColorMul, 1, 1, 1, 1);
 
-        for(SceneModel *m in _s.models)
+        for(NSUInteger mi = 0; mi < _s.models.count && mi < _loopVAOs.count; mi++)
         {
-            if(!m.hasOvalPath || m.ovalRadius <= 0)
-                continue;
-
-            glPushMatrix();
-            glTranslatef(m.position.x, m.position.y, m.position.z);
-
-            glBegin(GL_LINE_LOOP);
-            for(int i = 0; i < 64; i++)
-            {
-                float a = DegToRad(360.0f * (float)i / 64.0f);
-                Vec3 pt = V3RotXYZ((Vec3){cosf(a) * m.ovalRadius, 0.0f, sinf(a) * m.ovalRadius},
-                                   m.ovalPlaneRot);
-                glVertex3f(pt.x, pt.y, pt.z);
-            }
-            glEnd();
-
-            glPopMatrix();
+            GLuint loopVAO = (GLuint)[[_loopVAOs objectAtIndex:mi] unsignedIntValue];
+            if(!loopVAO) continue;
+            glBindVertexArray(loopVAO);
+            glDrawArrays(GL_LINE_LOOP, 0, 64);
         }
 
+        glBindVertexArray(0);
+        glUseProgram(0);
         glEnable(GL_DEPTH_TEST);
-        glColor4f(1, 1, 1, 1);
     }
 
+    // --- Set per-frame mesh shader constants ---
+    if(_shader)
+    {
+        // Light direction in view space (view is pure translation, so same as world space here)
+        Vec3 sd = _s.sunDir;
+        float ldv[3] = {
+            _view.m[0]*sd.x + _view.m[4]*sd.y + _view.m[8]*sd.z,
+            _view.m[1]*sd.x + _view.m[5]*sd.y + _view.m[9]*sd.z,
+            _view.m[2]*sd.x + _view.m[6]*sd.y + _view.m[10]*sd.z
+        };
+        float len = sqrtf(ldv[0]*ldv[0] + ldv[1]*ldv[1] + ldv[2]*ldv[2]);
+        if(len > 1e-6f) { ldv[0]/=len; ldv[1]/=len; ldv[2]/=len; }
+
+        glUseProgram(_shader);
+        glUniformMatrix4fv(_uView, 1, GL_FALSE, _view.m);
+        glUniformMatrix4fv(_uProj, 1, GL_FALSE, _proj.m);
+        glUniform3fv(_uLightDir, 1, ldv);
+        glUseProgram(0);
+    }
+
+    // --- Models ---
     for(SceneModel *m in _s.models)
     {
         Vec3 p = m.position;
-        float pathMat[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+        Mat4 pathMat4 = Mat4Identity();
         BOOL usePathMat = NO;
 
         if(m.hasOvalPath && m.ovalRadius > 0)
@@ -1989,7 +2478,6 @@ static void DrawAxes(float len)
             Vec3 localOrbit, localTangent;
             if(m.ovalRev)
             {
-                // Mirror Z: orbit travels clockwise; tangent is d/da of (cos,0,-sin)
                 localOrbit   = (Vec3){cosf(a) * m.ovalRadius, 0.0f, -sinf(a) * m.ovalRadius};
                 localTangent = (Vec3){-sinf(a), 0.0f, -cosf(a)};
             }
@@ -1998,39 +2486,31 @@ static void DrawAxes(float len)
                 localOrbit   = (Vec3){cosf(a) * m.ovalRadius, 0.0f, sinf(a) * m.ovalRadius};
                 localTangent = (Vec3){-sinf(a), 0.0f, cosf(a)};
             }
-            Vec3 localUp = {0.0f, 1.0f, 0.0f};
 
-            Vec3 worldOrbit   = V3RotXYZ(localOrbit,   m.ovalPlaneRot);
-            Vec3 worldTangent = V3RotXYZ(localTangent,  m.ovalPlaneRot);
-            Vec3 worldUp      = V3RotXYZ(localUp,       m.ovalPlaneRot);
+            Vec3 worldOrbit   = V3RotXYZ(localOrbit,  m.ovalPlaneRot);
+            Vec3 worldTangent = V3RotXYZ(localTangent, m.ovalPlaneRot);
+            Vec3 worldUp      = V3RotXYZ((Vec3){0,1,0}, m.ovalPlaneRot);
 
-            p.x += worldOrbit.x;
-            p.y += worldOrbit.y;
-            p.z += worldOrbit.z;
+            p.x += worldOrbit.x; p.y += worldOrbit.y; p.z += worldOrbit.z;
 
-            // Build orientation matrix so model +Z faces direction of travel.
             Vec3 fwd   = V3Normalize(worldTangent);
             Vec3 right = V3Normalize(V3Cross(worldUp, fwd));
             Vec3 up    = V3Cross(fwd, right);
 
-            pathMat[0]=right.x; pathMat[1]=right.y; pathMat[2]=right.z;  pathMat[3]=0;
-            pathMat[4]=up.x;    pathMat[5]=up.y;    pathMat[6]=up.z;     pathMat[7]=0;
-            pathMat[8]=fwd.x;   pathMat[9]=fwd.y;   pathMat[10]=fwd.z;   pathMat[11]=0;
-            pathMat[12]=0;      pathMat[13]=0;       pathMat[14]=0;       pathMat[15]=1;
+            pathMat4.m[0]=right.x; pathMat4.m[1]=right.y; pathMat4.m[2]=right.z;
+            pathMat4.m[4]=up.x;    pathMat4.m[5]=up.y;    pathMat4.m[6]=up.z;
+            pathMat4.m[8]=fwd.x;   pathMat4.m[9]=fwd.y;   pathMat4.m[10]=fwd.z;
             usePathMat = YES;
         }
 
-        glPushMatrix();
-        glTranslatef(p.x, p.y, p.z);
-        if(usePathMat)
-            glMultMatrixf(pathMat);
-        if(m.rotationDeg.x != 0.0f) glRotatef(m.rotationDeg.x, 1, 0, 0);
-        if(m.rotationDeg.y != 0.0f) glRotatef(m.rotationDeg.y, 0, 1, 0);
-        if(m.rotationDeg.z != 0.0f) glRotatef(m.rotationDeg.z, 0, 0, 1);
+        Mat4 model = Mat4Translate(p.x, p.y, p.z);
+        if(usePathMat)                    model = Mat4Mul(model, pathMat4);
+        if(m.rotationDeg.x != 0.0f)      model = Mat4Mul(model, Mat4RotateX(m.rotationDeg.x));
+        if(m.rotationDeg.y != 0.0f)      model = Mat4Mul(model, Mat4RotateY(m.rotationDeg.y));
+        if(m.rotationDeg.z != 0.0f)      model = Mat4Mul(model, Mat4RotateZ(m.rotationDeg.z));
 
         POFMesh *pm = _mesh[m.pofPath];
-        if((id)pm == [NSNull null])
-            pm = nil;
+        if((id)pm == [NSNull null]) pm = nil;
 
         if(!pm && !_mesh[m.pofPath])
         {
@@ -2042,10 +2522,6 @@ static void DrawAxes(float len)
 
         if(pm)
         {
-            glEnable(GL_TEXTURE_2D);
-            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-            glColor4f(1, 1, 1, 1);
-
             NSMutableDictionary *children = [NSMutableDictionary dictionary];
             NSMutableArray *roots = [NSMutableArray array];
 
@@ -2059,11 +2535,7 @@ static void DrawAxes(float len)
                 {
                     NSNumber *pk = @(sub.parent);
                     NSMutableArray *arr = children[pk];
-                    if(!arr)
-                    {
-                        arr = [NSMutableArray array];
-                        children[pk] = arr;
-                    }
+                    if(!arr) { arr = [NSMutableArray array]; children[pk] = arr; }
                     [arr addObject:sub];
                 }
             }
@@ -2081,8 +2553,6 @@ static void DrawAxes(float len)
                     if(!sub.rotates) continue;
                     NSNumber *axis = @(sub.movementAxis);
                     NSUInteger idx = [axisCount[axis] unsignedIntegerValue];
-                    // Even-indexed rotators on an axis are the "first" group.
-                    // RotRev swaps which group spins in reverse.
                     BOOL reversed = (idx % 2 == 0) ? (BOOL)m.rotRev : (BOOL)!m.rotRev;
                     if(reversed) [revSet addObject:@(sub.sid)];
                     axisCount[axis] = @(idx + 1);
@@ -2091,19 +2561,24 @@ static void DrawAxes(float len)
             }
 
             for(POFSub *root in roots)
-                [self drawSubobject:root mesh:pm children:children elapsed:_e reversedSubs:reversedSubs];
-
-            glDisable(GL_TEXTURE_2D);
+                [self drawSubobject:root mesh:pm children:children elapsed:_e
+                       reversedSubs:reversedSubs modelMat:model];
         }
         else
         {
-            glDisable(GL_TEXTURE_2D);
-            glColor3f(1, 0.1f, 0.1f);
-            DrawCube(12.0f);
-            glColor4f(1, 1, 1, 1);
+            // Failed mesh load — red placeholder cube
+            Mat4 mvp = Mat4Mul(_proj, Mat4Mul(_view, model));
+            glUseProgram(_flatShader);
+            glUniformMatrix4fv(_uMVP, 1, GL_FALSE, mvp.m);
+            glUniform1f(_uPointSize, 1.0f);
+            glUniform4f(_uColorMul, 1, 0.1f, 0.1f, 1);
+            glDisable(GL_CULL_FACE);
+            glBindVertexArray(_cubeVAO);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+            glBindVertexArray(0);
+            glEnable(GL_CULL_FACE);
+            glUseProgram(0);
         }
-
-        glPopMatrix();
     }
 
     [[self openGLContext] flushBuffer];

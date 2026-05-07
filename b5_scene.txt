@@ -1,10 +1,11 @@
 # Example scene
 camera=600,1000,5000
-#camera=5000,0,0
 textureRoot=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/maps/
 skybox=nebula
-showLoops=true
-model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Babylon5.pof,0,0,0,rotx=-20,roty=30,rotz=0,ovalpath=false,radius=0,speed=0,offset=0
-model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Omega.pof,1500,-1750,-1500,0,0,0,ovalpath=true,radius=5000,speed=2,offset=0,ovalrotx=0,ovalroty=180,ovalrotz=10,ovalrev=1
-model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Omega.pof,1500,0,-2000,0,0,0,ovalpath=true,radius=5250,speed=2,offset=0,ovalrotx=0,ovalroty=180,ovalrotz=10,ovalrev=1
-model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Omega.pof,1500,1750,-1500,0,0,0,ovalpath=true,radius=5000,speed=2,offset=0,ovalrotx=0,ovalroty=180,ovalrotz=10,ovalrev=1
+showLoops=false
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Babylon5.pof,0,0,0,rotx=-20,roty=30,rotz=0,ovalpath=false,radius=0,speed=0,offset=0,rotsync=1,rotrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Aurora.pof,0,-550,0,0,0,0,ovalpath=true,radius=4510,speed=5,offset=0,ovalrotx=0,ovalroty=180,ovalrotz=40,ovalrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Omega.pof,0,0,0,0,0,0,ovalpath=true,radius=4520,speed=5,offset=0,ovalrotx=0,ovalroty=180,ovalrotz=40,ovalrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Aurora.pof,0,550,0,0,0,0,ovalpath=true,radius=4610,speed=5,offset=0,ovalrotx=0,ovalroty=180,ovalrotz=40,ovalrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Aurora.pof,0,550,0,0,0,0,ovalpath=true,radius=4750,speed=5,offset=0,ovalrotx=0,ovalroty=180,ovalrotz=40,ovalrev=1
+model=/home/james/Virtual Reality/Games/Freespace2/TBP/TBP-3.9.1/data/models/EAM_Aurora.pof,0,550,0,0,0,0,ovalpath=true,radius=4850,speed=5,offset=0,ovalrotx=0,ovalroty=180,ovalrotz=40,ovalrev=1

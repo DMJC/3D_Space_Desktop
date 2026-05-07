@@ -5,6 +5,6 @@ APP_NAME = SceneViewer
 SceneViewer_OBJC_FILES = main.m
 SceneViewer_RESOURCE_FILES = scene.txt
 
-ADDITIONAL_GUI_LIBS += -lGL -lm
+ADDITIONAL_GUI_LIBS += -lGL -lGLEW -lm
 
 include $(GNUSTEP_MAKEFILES)/application.make
